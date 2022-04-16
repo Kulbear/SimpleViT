@@ -5,8 +5,11 @@ import torchvision.transforms as transforms
 from layers import (
     # Identity,
     PatchEmbedding,
-    FeedforwardLayer
+    FeedforwardLayer,
+    MultiHeadSelfAttention
 )
+
+from vit import ViT
 
 pil2tensor = transforms.PILToTensor()
 
@@ -17,10 +20,14 @@ def main():
     img = img.resize((224, 224))
     tensor = pil2tensor(img)
     tensor = tensor.unsqueeze(0) / 255.
-    # print(tensor)
+    ipt = tensor
+    print(tensor.size())
+
     # def layers
     patch_embedding = PatchEmbedding(16, 3, 32, dropout=0.)
     mlp = FeedforwardLayer(32)
+    mh_attn = MultiHeadSelfAttention(embed_dim=32, num_heads=4, qkv_bias=False, qk_scale=None)
+    vit = ViT()
 
     # pass to patch_embed
     print('Input', tensor.size())
@@ -28,6 +35,13 @@ def main():
     print('After patch embedding', tensor.size())
     tensor = mlp(tensor)
     print('After MLP', tensor.size())
+    tensor = mh_attn(tensor)
+    print('After attention', tensor.size())
+
+
+    print('Input', ipt.size())
+    x = vit(ipt)
+    print('After ViT', x.size())
 
 
 main()
