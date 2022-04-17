@@ -3,7 +3,7 @@ from PIL import Image
 import torchvision.transforms as transforms
 
 from layers import (
-    # Identity,
+    # Identity,  # no longer used
     PatchEmbedding,
     FeedforwardLayer,
     MultiHeadSelfAttention
@@ -15,6 +15,7 @@ pil2tensor = transforms.PILToTensor()
 
 
 def main():
+    """ main function for testing everything now """
     # load sample data
     img = Image.open('./sample.png')
     img = img.resize((224, 224))
@@ -24,9 +25,19 @@ def main():
     print(tensor.size())
 
     # def layers
-    patch_embedding = PatchEmbedding(16, 3, 32, dropout=0.)
-    mlp = FeedforwardLayer(32)
-    mh_attn = MultiHeadSelfAttention(embed_dim=32, num_heads=4, qkv_bias=False, qk_scale=None)
+    patch_embedding = PatchEmbedding(
+        image_size=224, patch_size=16,
+        in_channels=3, embed_dim=768,
+        dropout=0.
+    )
+    mlp = FeedforwardLayer(
+        768,
+        mlp_ratio=4.0, dropout=0.
+    )
+    mh_attn = MultiHeadSelfAttention(
+        embed_dim=768, num_heads=8,
+        qkv_bias=False, qk_scale=None
+    )
     vit = ViT()
 
     # pass to patch_embed
@@ -38,7 +49,7 @@ def main():
     tensor = mh_attn(tensor)
     print('After attention', tensor.size())
 
-
+    ipt = ipt.expand((4, -1, -1, -1))
     print('Input', ipt.size())
     x = vit(ipt)
     print('After ViT', x.size())
