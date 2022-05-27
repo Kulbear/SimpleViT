@@ -19,11 +19,17 @@ class PatchEmbedding(nn.Module):
             patch_size=16,
             in_channels=3,
             embed_dim=768,
-            dropout=0.
+            dropout=0.,
+            use_norm=False,
+            use_cls_token=True,
+            use_distill_token=False
     ):
         super().__init__()
 
         n_patches = (image_size // patch_size) * (image_size // patch_size)
+        self.use_cls_token = use_cls_token
+        self.use_distill_token = use_distill_token
+        self.use_norm = use_norm
         self.embedding = nn.Conv2d(
             in_channels,
             embed_dim,
@@ -32,18 +38,32 @@ class PatchEmbedding(nn.Module):
             bias=False
         )
 
-        self.cls_token = nn.Parameter(
-            torch.zeros(
-                1, 1, embed_dim,
-                requires_grad=True
+        self.norm = nn.LayerNorm(embed_dim)
+
+        if self.use_cls_token:
+            self.cls_token = nn.Parameter(
+                torch.zeros(
+                    1, 1, embed_dim,
+                    requires_grad=True
+                )
             )
-        )
+            n_patches += 1  # +1 for cls token
+        if self.use_distill_token:
+            self.distill_token = nn.Parameter(
+                torch.zeros(
+                    1, 1, embed_dim,
+                    requires_grad=True
+                )
+            )
+            n_patches += 1  # +1 for distill token
+            # initialize to non-zeros
+            nn.init.xavier_uniform(self.distill_token.data)
 
         self.position_embedding = nn.Parameter(
             torch.normal(
                 0.,
                 0.02,
-                size=(1, n_patches + 1, embed_dim),  # +1 for cls token
+                size=(1, n_patches, embed_dim),
                 requires_grad=True
             )
         )
@@ -57,11 +77,21 @@ class PatchEmbedding(nn.Module):
         x = torch.flatten(x, start_dim=2)
         x = x.transpose(2, 1)  # [N, h'*w', embed_dim]
 
-        # need to add cls_token for entire batch
-        # cls_token: [1, 1, embed_dim]
-        # cls_tokens: [N, 1, embed_dim] where N is batch size
-        cls_tokens = self.cls_token.expand([x.shape[0], 1, -1])
-        x = torch.cat([cls_tokens, x], dim=1)
+        if self.use_norm:
+            x = self.norm(x)
+
+        # need to add extra token for entire batch
+        if self.use_distill_token:
+            # distill_token: [1, 1, embed_dim]
+            # distill_tokens: [N, 1, embed_dim] where N is batch size
+            distill_tokens = self.distill_token.expand([x.shape[0], 1, -1])
+            x = torch.cat([distill_tokens, x], dim=1)
+
+        if self.use_cls_token:
+            # cls_token: [1, 1, embed_dim]
+            # cls_tokens: [N, 1, embed_dim] where N is batch size
+            cls_tokens = self.cls_token.expand([x.shape[0], 1, -1])
+            x = torch.cat([cls_tokens, x], dim=1)
 
         x = x + self.position_embedding  # just broadcast
         x = self.dropout(x)
@@ -86,6 +116,46 @@ class FeedforwardLayer(nn.Module):
         x = self.fc2(x)
         x = self.act(x)
         x = self.dropout(x)
+        return x
+
+
+class EncoderLayer(nn.Module):
+
+    def __init__(
+            self,
+            embed_dim=768,
+            num_heads=8,
+            qkv_bias=False,
+            qk_scale=None,
+            attn_dropout=0.,
+            mlp_ratio=4.0,
+            mlp_dropout=0.
+    ):
+        super().__init__()
+
+        self.attn = MultiHeadSelfAttention(
+            embed_dim=embed_dim, num_heads=num_heads,
+            qkv_bias=qkv_bias, qk_scale=qk_scale,
+            dropout=attn_dropout
+        )
+        self.attn_norm = nn.LayerNorm(embed_dim)
+        self.mlp = FeedforwardLayer(
+            embed_dim,
+            mlp_ratio=mlp_ratio, dropout=mlp_dropout
+        )
+        self.mlp_norm = nn.LayerNorm(embed_dim)
+
+    def forward(self, x):
+        h = x
+        x = self.attn_norm(x)
+        x = self.attn(x)
+        x = h + x
+
+        h = x
+        x = self.mlp_norm(x)
+        x = self.mlp(x)
+        x = h + x
+
         return x
 
 
@@ -125,12 +195,10 @@ class MultiHeadSelfAttention(nn.Module):
         return x
 
     def forward(self, x):
-        # B: batch size, N: # of patches + cls token if needed
-        print(1, x.shape)
+        # B: batch size, N: # of patches + (cls token + distill token) if needed
         # x: [B, N, all_heads_dim]
         B, N, _ = x.shape
         qkv = self.qkv(x).chunk(3, -1)
-        print(2, qkv[0].shape)
         # [B, N, all_heads_dim] * 3
         q, k, v = map(self._transpose_multi_head, qkv)
 

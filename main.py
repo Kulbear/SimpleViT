@@ -1,4 +1,5 @@
 from PIL import Image
+from deit import DeiT
 
 import torchvision.transforms as transforms
 
@@ -10,6 +11,7 @@ from layers import (
 )
 
 from vit import ViT
+from deit import DeiT
 
 pil2tensor = transforms.PILToTensor()
 
@@ -39,6 +41,7 @@ def main():
         qkv_bias=False, qk_scale=None
     )
     vit = ViT()
+    deit = DeiT()
 
     # pass to patch_embed
     print('Input', tensor.size())
@@ -51,8 +54,10 @@ def main():
 
     ipt = ipt.expand((4, -1, -1, -1))
     print('Input', ipt.size())
-    x = vit(ipt)
+    x = vit(ipt)['logit']
     print('After ViT', x.size())
+    x = deit(ipt)['logit']
+    print('After DeiT', x.size())
 
 
 main()
