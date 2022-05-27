@@ -11,6 +11,36 @@ class Identity(nn.Module):
         return x
 
 
+class PatchMerging(nn.Module):
+    def __init__(self, input_resolution, embed_dim) -> None:
+        super().__init__()
+        self.resolution = input_resolution
+        self.embed_dim = embed_dim
+        self.reduction = nn.Linear(embed_dim * 4, embed_dim * 2)
+        self.norm = nn.LayerNorm(embed_dim * 4)
+
+    def forward(self, x):
+        h, w = self.resolution
+        b, _, c = x.size()
+
+        x = x.reshape([b, h, w, c])
+
+        # dimension:   [b,      h     ,      w      , c]
+        # index format [:, index::skip, index:: skip, :]
+        #                    [ (0, 0) , (0, 1) ]
+        #                    [ (1, 0) , (1, 1) ]
+        x0 = x[:, 0::2, 0::2, :]
+        x1 = x[:, 0::2, 1::2, :]
+        x2 = x[:, 1::2, 0::2, :]
+        x3 = x[:, 1::2, 1::2, :]
+
+        x = torch.cat([x0, x1, x2, x3], dim=-1)
+        x = x.reshape([b, -1, 4 * c])
+        x = self.norm(x)
+        x = self.reduction(x)
+        return x
+
+
 class PatchEmbedding(nn.Module):
 
     def __init__(
@@ -57,7 +87,7 @@ class PatchEmbedding(nn.Module):
             )
             n_patches += 1  # +1 for distill token
             # initialize to non-zeros
-            nn.init.xavier_uniform(self.distill_token.data)
+            nn.init.xavier_uniform_(self.distill_token.data)
 
         self.position_embedding = nn.Parameter(
             torch.normal(
@@ -195,7 +225,7 @@ class MultiHeadSelfAttention(nn.Module):
         return x
 
     def forward(self, x):
-        # B: batch size, N: # of patches + (cls token + distill token) if needed
+        # B: batch size, N: # of patches, remember to count (cls token + distill token) if needed
         # x: [B, N, all_heads_dim]
         B, N, _ = x.shape
         qkv = self.qkv(x).chunk(3, -1)
@@ -221,3 +251,75 @@ class MultiHeadSelfAttention(nn.Module):
         out = self.dropout(out)
 
         return out
+
+
+def window_partition(x, window_size):
+    B, H, W, C = x.shape
+    x = x.reshape([B, H // window_size, window_size, W // window_size, window_size, C])
+    x = x.permute(0, 1, 3, 2, 4, 5)
+    # [B, h//ws, w//ws, ws, ws, c]
+    x = x.reshape([-1, window_size, window_size, C])
+    # [B * num_patches, ws, ws, c]
+    return x
+
+
+def window_reverse(windows, window_size, H, W):
+    B = int(windows.size()[0] // (H / window_size * W / window_size))
+    x = windows.reshape([B, H // window_size, W // window_size, window_size, window_size, -1])
+    x = x.permute([0, 1, 3, 2, 4, 5])
+    x = x.reshape([B, H, W, -1])
+    return x
+
+
+class SwinBlock(nn.Module):
+    def __init__(
+            self,
+            embed_dim=96, input_resolution=(56, 56),
+            num_heads=4, window_size=7,
+            qkv_bias=False,
+            qk_scale=None,
+            attn_dropout=0.,
+            mlp_ratio=4.0,
+            mlp_dropout=0.) -> None:
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.resolution = input_resolution
+        self.num_heads = num_heads
+        self.window_size = window_size
+
+        self.attn_norm = nn.LayerNorm(embed_dim)
+        self.attn = MultiHeadSelfAttention(
+            embed_dim=embed_dim, num_heads=num_heads,
+            qkv_bias=qkv_bias, qk_scale=qk_scale,
+            dropout=attn_dropout
+        )
+
+        self.mlp_norm = nn.LayerNorm(embed_dim)
+        self.mlp = FeedforwardLayer(
+            embed_dim,
+            mlp_ratio=mlp_ratio, dropout=mlp_dropout
+        )
+
+    def forward(self, x):
+        H, W = self.resolution
+        B, N, C = x.shape
+
+        h = x
+        x = self.attn_norm(x)
+        # windows!
+        x = x.reshape([B, H, W, C])
+        x_windows = window_partition(x, self.window_size)  # [B * num_patches, ws, ws, c]
+        x_windows = x_windows.reshape([-1, self.window_size * self.window_size, C])
+        attention_windows = self.attn(x_windows)
+        attention_windows = attention_windows.reshape([-1, self.window_size, self.window_size, C])
+        print(attention_windows.size())
+        x = window_reverse(attention_windows, self.window_size, H, W)
+        x = x.reshape([B, H * W, C])
+        x = h + x
+
+        h = x
+        x = self.mlp_norm(x)
+        x = self.mlp(x)
+        x = h + x
+
+        return x
